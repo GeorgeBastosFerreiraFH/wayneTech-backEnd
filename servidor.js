@@ -9,12 +9,11 @@ dotenv.config()
 
 const app = express()
 const PORTA = process.env.PORT || 5000
-const CHAVE_JWT = process.env.JWT_SECRET || "waynetech_secret_key_2025"
+const CHAVE_JWT = process.env.JWT_SECRET || "o_bruce_wayne_e_o_batman"
 
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
-  "https://waynetechsecurity.netlify.app",
   process.env.FRONTEND_URL,
 ].filter(Boolean)
 
