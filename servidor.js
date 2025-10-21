@@ -1,39 +1,31 @@
 import express from "express"
 import cors from "cors"
-import pkg from "pg"
+import { neon } from "@neondatabase/serverless"
 import jwt from "jsonwebtoken"
 import bcrypt from "bcrypt"
 
-const { Pool } = pkg
-
 const app = express()
 
-// Configuração do banco de dados
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-})
+const sql = neon(process.env.DATABASE_URL)
 
 // Configuração de CORS para produção
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
-  "https://waynetechsecurity.netlify.app", // URL do Netlify hardcoded
+  "https://waynetechsecurity.netlify.app",
   process.env.FRONTEND_URL,
-]
+].filter(Boolean) // Remove valores undefined
 
 const corsOptions = {
   origin: (origin, callback) => {
     console.log("CORS - Origin recebida:", origin)
     console.log("CORS - Origens permitidas:", allowedOrigins)
 
-    // Permite requisições sem origin (Postman, curl, etc)
     if (!origin) {
       console.log("CORS - Permitindo requisição sem origin")
       return callback(null, true)
     }
 
-    // Verifica se a origin está na lista de permitidas
     if (allowedOrigins.indexOf(origin) !== -1) {
       console.log("CORS - Origin permitida:", origin)
       callback(null, true)
@@ -85,14 +77,14 @@ app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, senha } = req.body
 
-    const resultado = await pool.query("SELECT * FROM usuarios WHERE email = $1", [email])
+    const resultado = await sql`SELECT * FROM usuarios WHERE email = ${email}`
 
-    if (resultado.rows.length === 0) {
+    if (resultado.length === 0) {
       console.log("Login - Usuário não encontrado:", email)
       return res.status(401).json({ erro: "Credenciais inválidas" })
     }
 
-    const usuario = resultado.rows[0]
+    const usuario = resultado[0]
     const senhaValida = await bcrypt.compare(senha, usuario.senha)
 
     if (!senhaValida) {
@@ -124,7 +116,7 @@ app.post("/api/auth/login", async (req, res) => {
     })
   } catch (erro) {
     console.error("Login - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao fazer login" })
+    res.status(500).json({ erro: "Erro ao fazer login", detalhes: erro.message })
   }
 })
 
@@ -133,16 +125,16 @@ app.get("/api/auth/verificar", verificarToken, async (req, res) => {
   console.log("Verificar - Token válido para:", req.usuario.email)
 
   try {
-    const resultado = await pool.query("SELECT id, nome, email, nivel FROM usuarios WHERE id = $1", [req.usuario.id])
+    const resultado = await sql`SELECT id, nome, email, nivel FROM usuarios WHERE id = ${req.usuario.id}`
 
-    if (resultado.rows.length === 0) {
+    if (resultado.length === 0) {
       return res.status(404).json({ erro: "Usuário não encontrado" })
     }
 
-    res.json({ usuario: resultado.rows[0] })
+    res.json({ usuario: resultado[0] })
   } catch (erro) {
     console.error("Verificar - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao verificar token" })
+    res.status(500).json({ erro: "Erro ao verificar token", detalhes: erro.message })
   }
 })
 
@@ -153,25 +145,24 @@ app.get("/api/inventario", verificarToken, async (req, res) => {
   try {
     const nivelUsuario = obterNivelNumerico(req.usuario.nivel)
 
-    const resultado = await pool.query(
-      `SELECT * FROM inventario 
-       WHERE COALESCE(
-         CASE nivel_minimo 
-           WHEN 'funcionario' THEN 1 
-           WHEN 'gerente' THEN 2 
-           WHEN 'admin' THEN 3 
-           ELSE 1 
-         END, 1
-       ) <= $1 
-       ORDER BY id`,
-      [nivelUsuario],
-    )
+    const resultado = await sql`
+      SELECT * FROM inventario 
+      WHERE COALESCE(
+        CASE nivel_minimo 
+          WHEN 'funcionario' THEN 1 
+          WHEN 'gerente' THEN 2 
+          WHEN 'admin' THEN 3 
+          ELSE 1 
+        END, 1
+      ) <= ${nivelUsuario}
+      ORDER BY id
+    `
 
-    console.log("Inventário - Retornando", resultado.rows.length, "itens")
-    res.json(resultado.rows)
+    console.log("Inventário - Retornando", resultado.length, "itens")
+    res.json(resultado)
   } catch (erro) {
     console.error("Inventário - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao buscar inventário" })
+    res.status(500).json({ erro: "Erro ao buscar inventário", detalhes: erro.message })
   }
 })
 
@@ -182,19 +173,18 @@ app.post("/api/inventario", verificarToken, async (req, res) => {
   try {
     const { nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo } = req.body
 
-    const resultado = await pool.query(
-      `INSERT INTO inventario 
-       (nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-       RETURNING *`,
-      [nome, categoria, status, localizacao, modelo_3d, thumbnail, JSON.stringify(especificacoes), nivel_minimo],
-    )
+    const resultado = await sql`
+      INSERT INTO inventario 
+      (nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo) 
+      VALUES (${nome}, ${categoria}, ${status}, ${localizacao}, ${modelo_3d}, ${thumbnail}, ${JSON.stringify(especificacoes)}, ${nivel_minimo})
+      RETURNING *
+    `
 
-    console.log("Adicionar item - Sucesso:", resultado.rows[0].id)
-    res.status(201).json(resultado.rows[0])
+    console.log("Adicionar item - Sucesso:", resultado[0].id)
+    res.status(201).json(resultado[0])
   } catch (erro) {
     console.error("Adicionar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao adicionar item" })
+    res.status(500).json({ erro: "Erro ao adicionar item", detalhes: erro.message })
   }
 })
 
@@ -206,25 +196,24 @@ app.put("/api/inventario/:id", verificarToken, async (req, res) => {
     const { id } = req.params
     const { nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo } = req.body
 
-    const resultado = await pool.query(
-      `UPDATE inventario 
-       SET nome = $1, categoria = $2, status = $3, localizacao = $4, 
-           modelo_3d = $5, thumbnail = $6, especificacoes = $7, nivel_minimo = $8,
-           atualizado_em = CURRENT_TIMESTAMP
-       WHERE id = $9 
-       RETURNING *`,
-      [nome, categoria, status, localizacao, modelo_3d, thumbnail, JSON.stringify(especificacoes), nivel_minimo, id],
-    )
+    const resultado = await sql`
+      UPDATE inventario 
+      SET nome = ${nome}, categoria = ${categoria}, status = ${status}, localizacao = ${localizacao},
+          modelo_3d = ${modelo_3d}, thumbnail = ${thumbnail}, especificacoes = ${JSON.stringify(especificacoes)}, 
+          nivel_minimo = ${nivel_minimo}, atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ${id}
+      RETURNING *
+    `
 
-    if (resultado.rows.length === 0) {
+    if (resultado.length === 0) {
       return res.status(404).json({ erro: "Item não encontrado" })
     }
 
     console.log("Atualizar item - Sucesso:", id)
-    res.json(resultado.rows[0])
+    res.json(resultado[0])
   } catch (erro) {
     console.error("Atualizar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao atualizar item" })
+    res.status(500).json({ erro: "Erro ao atualizar item", detalhes: erro.message })
   }
 })
 
@@ -235,9 +224,9 @@ app.delete("/api/inventario/:id", verificarToken, async (req, res) => {
   try {
     const { id } = req.params
 
-    const resultado = await pool.query("DELETE FROM inventario WHERE id = $1 RETURNING *", [id])
+    const resultado = await sql`DELETE FROM inventario WHERE id = ${id} RETURNING *`
 
-    if (resultado.rows.length === 0) {
+    if (resultado.length === 0) {
       return res.status(404).json({ erro: "Item não encontrado" })
     }
 
@@ -245,7 +234,7 @@ app.delete("/api/inventario/:id", verificarToken, async (req, res) => {
     res.json({ mensagem: "Item deletado com sucesso" })
   } catch (erro) {
     console.error("Deletar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao deletar item" })
+    res.status(500).json({ erro: "Erro ao deletar item", detalhes: erro.message })
   }
 })
 
@@ -259,8 +248,23 @@ app.get("/", (req, res) => {
 })
 
 // Rota de health check
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() })
+app.get("/api/health", async (req, res) => {
+  try {
+    await sql`SELECT 1`
+    res.json({
+      status: "ok",
+      database: "connected",
+      timestamp: new Date().toISOString(),
+    })
+  } catch (erro) {
+    console.error("Health check - Erro no banco:", erro)
+    res.status(500).json({
+      status: "error",
+      database: "disconnected",
+      erro: erro.message,
+      timestamp: new Date().toISOString(),
+    })
+  }
 })
 
 export default app
