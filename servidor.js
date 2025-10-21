@@ -1,109 +1,107 @@
 import express from "express"
 import cors from "cors"
-import { neon } from "@neondatabase/serverless"
 import jwt from "jsonwebtoken"
-import bcrypt from "bcrypt"
+import bcrypt from "bcryptjs"
+import dotenv from "dotenv"
+import { query, initDatabase } from "./database/connection.js"
+
+dotenv.config()
 
 const app = express()
+const PORTA = process.env.PORT || 5000
+const CHAVE_JWT = process.env.JWT_SECRET || "waynetech_secret_key_2025"
 
-const sql = neon(process.env.DATABASE_URL)
-
-// Configuração de CORS para produção
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
-  "https://waynetechsecurity.netlify.app",
   process.env.FRONTEND_URL,
-].filter(Boolean) // Remove valores undefined
+]
 
-const corsOptions = {
-  origin: (origin, callback) => {
-    console.log("CORS - Origin recebida:", origin)
-    console.log("CORS - Origens permitidas:", allowedOrigins)
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Permitir requisições sem origin (mobile apps, Postman, etc)
+      if (!origin) return callback(null, true)
 
-    if (!origin) {
-      console.log("CORS - Permitindo requisição sem origin")
-      return callback(null, true)
-    }
+      if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+        callback(null, true)
+      } else {
+        console.log("[v0] Origem bloqueada pelo CORS:", origin)
+        callback(new Error("Não permitido pelo CORS"))
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+)
 
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      console.log("CORS - Origin permitida:", origin)
-      callback(null, true)
-    } else {
-      console.log("CORS - Origin bloqueada:", origin)
-      callback(new Error("Not allowed by CORS"))
-    }
-  },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}
-
-app.use(cors(corsOptions))
 app.use(express.json())
 
-// Middleware de verificação de token
+const niveisAcesso = {
+  funcionario: 1,
+  gerente: 2,
+  admin: 3,
+}
+
+// Middleware de autenticação
 const verificarToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"]
-  const token = authHeader && authHeader.split(" ")[1]
+  const token = req.headers.authorization?.split(" ")[1]
 
   if (!token) {
     return res.status(401).json({ erro: "Token não fornecido" })
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (erro, usuario) => {
-    if (erro) {
-      return res.status(403).json({ erro: "Token inválido" })
-    }
-    req.usuario = usuario
+  try {
+    const decoded = jwt.verify(token, CHAVE_JWT)
+    req.usuario = decoded
     next()
-  })
-}
-
-// Função para mapear nível de acesso para número
-const obterNivelNumerico = (nivel) => {
-  const niveis = {
-    funcionario: 1,
-    gerente: 2,
-    admin: 3,
+  } catch (erro) {
+    return res.status(401).json({ erro: "Token inválido" })
   }
-  return niveis[nivel] || 0
 }
 
-// Rota de login
-app.post("/api/auth/login", async (req, res) => {
-  console.log("Login - Requisição recebida:", req.body.email)
+// Middleware de verificação de nível de acesso
+const verificarNivel = (nivelMinimo) => {
+  return (req, res, next) => {
+    const nivelUsuario = niveisAcesso[req.usuario.nivel] || 0
+    const nivelRequerido = niveisAcesso[nivelMinimo] || 0
 
+    if (nivelUsuario < nivelRequerido) {
+      return res.status(403).json({ erro: "Acesso negado" })
+    }
+
+    next()
+  }
+}
+
+// Rotas de autenticação
+app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, senha } = req.body
 
-    const resultado = await sql`SELECT * FROM usuarios WHERE email = ${email}`
+    const resultado = await query("SELECT * FROM usuarios WHERE email = $1", [email])
 
-    if (resultado.length === 0) {
-      console.log("Login - Usuário não encontrado:", email)
+    if (resultado.rows.length === 0) {
       return res.status(401).json({ erro: "Credenciais inválidas" })
     }
 
-    const usuario = resultado[0]
-    const senhaValida = await bcrypt.compare(senha, usuario.senha)
+    const usuario = resultado.rows[0]
+    const senhaValida = await bcrypt.compare(senha, usuario.senha_hash)
 
     if (!senhaValida) {
-      console.log("Login - Senha inválida para:", email)
       return res.status(401).json({ erro: "Credenciais inválidas" })
     }
 
-    const token = jwt.sign(
-      {
-        id: usuario.id,
-        email: usuario.email,
-        nome: usuario.nome,
-        nivel: usuario.nivel,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "24h" },
-    )
+    const token = jwt.sign({ id: usuario.id, email: usuario.email, nivel: usuario.nivel_acesso }, CHAVE_JWT, {
+      expiresIn: "24h",
+    })
 
-    console.log("Login - Sucesso para:", email)
+    await query("INSERT INTO logs (usuario_id, acao, detalhes) VALUES ($1, $2, $3)", [
+      usuario.id,
+      "login",
+      JSON.stringify({ email: usuario.email, ip: req.ip }),
+    ])
 
     res.json({
       token,
@@ -111,160 +109,217 @@ app.post("/api/auth/login", async (req, res) => {
         id: usuario.id,
         nome: usuario.nome,
         email: usuario.email,
-        nivel: usuario.nivel,
+        nivel: usuario.nivel_acesso,
       },
     })
   } catch (erro) {
-    console.error("Login - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao fazer login", detalhes: erro.message })
+    console.error("[v0] Erro no login:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
   }
 })
 
-// Rota de verificação de token
 app.get("/api/auth/verificar", verificarToken, async (req, res) => {
-  console.log("Verificar - Token válido para:", req.usuario.email)
-
   try {
-    const resultado = await sql`SELECT id, nome, email, nivel FROM usuarios WHERE id = ${req.usuario.id}`
+    const resultado = await query("SELECT id, nome, email, nivel_acesso FROM usuarios WHERE id = $1", [req.usuario.id])
 
-    if (resultado.length === 0) {
+    if (resultado.rows.length === 0) {
       return res.status(404).json({ erro: "Usuário não encontrado" })
     }
 
-    res.json({ usuario: resultado[0] })
+    res.json({ usuario: resultado.rows[0] })
   } catch (erro) {
-    console.error("Verificar - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao verificar token", detalhes: erro.message })
+    console.error("[v0] Erro ao verificar token:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
   }
 })
 
-// Rota de inventário com filtragem por nível
 app.get("/api/inventario", verificarToken, async (req, res) => {
-  console.log("Inventário - Requisição de:", req.usuario.email, "Nível:", req.usuario.nivel)
-
   try {
-    const nivelUsuario = obterNivelNumerico(req.usuario.nivel)
+    // Buscar todos os itens do inventário
+    const resultado = await query("SELECT * FROM inventario ORDER BY criado_em DESC")
 
-    const resultado = await sql`
-      SELECT * FROM inventario 
-      WHERE COALESCE(
-        CASE nivel_minimo 
-          WHEN 'funcionario' THEN 1 
-          WHEN 'gerente' THEN 2 
-          WHEN 'admin' THEN 3 
-          ELSE 1 
-        END, 1
-      ) <= ${nivelUsuario}
-      ORDER BY id
-    `
+    // Obter nível do usuário
+    const nivelUsuario = niveisAcesso[req.usuario.nivel] || 0
 
-    console.log("Inventário - Retornando", resultado.length, "itens")
-    res.json(resultado)
+    // Filtrar itens baseado no nível de acesso
+    const itensFiltrados = resultado.rows.filter((item) => {
+      const nivelItem = niveisAcesso[item.nivel_minimo] || 1
+      return nivelUsuario >= nivelItem
+    })
+
+    console.log(
+      `[v0] Inventário filtrado: ${itensFiltrados.length}/${resultado.rows.length} itens para usuário nível ${req.usuario.nivel}`,
+    )
+
+    res.json(itensFiltrados)
   } catch (erro) {
-    console.error("Inventário - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao buscar inventário", detalhes: erro.message })
+    console.error("[v0] Erro ao buscar inventário:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
   }
 })
 
-// Rota de adicionar item ao inventário
-app.post("/api/inventario", verificarToken, async (req, res) => {
-  console.log("Adicionar item - Requisição de:", req.usuario.email)
-
+app.post("/api/inventario", verificarToken, verificarNivel("admin"), async (req, res) => {
   try {
     const { nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo } = req.body
 
-    const resultado = await sql`
-      INSERT INTO inventario 
-      (nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo) 
-      VALUES (${nome}, ${categoria}, ${status}, ${localizacao}, ${modelo_3d}, ${thumbnail}, ${JSON.stringify(especificacoes)}, ${nivel_minimo})
-      RETURNING *
-    `
+    const resultado = await query(
+      `INSERT INTO inventario (nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [
+        nome,
+        categoria,
+        status,
+        localizacao,
+        modelo_3d,
+        thumbnail,
+        JSON.stringify(especificacoes),
+        nivel_minimo || "funcionario",
+      ],
+    )
 
-    console.log("Adicionar item - Sucesso:", resultado[0].id)
-    res.status(201).json(resultado[0])
+    await query("INSERT INTO logs (usuario_id, acao, detalhes) VALUES ($1, $2, $3)", [
+      req.usuario.id,
+      "adicionar_item",
+      JSON.stringify({ item: nome, nivel_minimo }),
+    ])
+
+    res.status(201).json(resultado.rows[0])
   } catch (erro) {
-    console.error("Adicionar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao adicionar item", detalhes: erro.message })
+    console.error("[v0] Erro ao adicionar item:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
   }
 })
 
-// Rota de atualizar item do inventário
-app.put("/api/inventario/:id", verificarToken, async (req, res) => {
-  console.log("Atualizar item - ID:", req.params.id)
-
+app.put("/api/inventario/:id", verificarToken, verificarNivel("admin"), async (req, res) => {
   try {
     const { id } = req.params
     const { nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo } = req.body
 
-    const resultado = await sql`
-      UPDATE inventario 
-      SET nome = ${nome}, categoria = ${categoria}, status = ${status}, localizacao = ${localizacao},
-          modelo_3d = ${modelo_3d}, thumbnail = ${thumbnail}, especificacoes = ${JSON.stringify(especificacoes)}, 
-          nivel_minimo = ${nivel_minimo}, atualizado_em = CURRENT_TIMESTAMP
-      WHERE id = ${id}
-      RETURNING *
-    `
+    const resultado = await query(
+      `UPDATE inventario 
+       SET nome = $1, categoria = $2, status = $3, localizacao = $4, 
+           modelo_3d = $5, thumbnail = $6, especificacoes = $7, nivel_minimo = $8, atualizado_em = NOW()
+       WHERE id = $9 RETURNING *`,
+      [
+        nome,
+        categoria,
+        status,
+        localizacao,
+        modelo_3d,
+        thumbnail,
+        JSON.stringify(especificacoes),
+        nivel_minimo || "funcionario",
+        id,
+      ],
+    )
 
-    if (resultado.length === 0) {
+    if (resultado.rows.length === 0) {
       return res.status(404).json({ erro: "Item não encontrado" })
     }
 
-    console.log("Atualizar item - Sucesso:", id)
-    res.json(resultado[0])
+    await query("INSERT INTO logs (usuario_id, acao, detalhes) VALUES ($1, $2, $3)", [
+      req.usuario.id,
+      "atualizar_item",
+      JSON.stringify({ item_id: id, nome, nivel_minimo }),
+    ])
+
+    res.json(resultado.rows[0])
   } catch (erro) {
-    console.error("Atualizar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao atualizar item", detalhes: erro.message })
+    console.error("[v0] Erro ao atualizar item:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
   }
 })
 
-// Rota de deletar item do inventário
-app.delete("/api/inventario/:id", verificarToken, async (req, res) => {
-  console.log("Deletar item - ID:", req.params.id)
-
+app.delete("/api/inventario/:id", verificarToken, verificarNivel("admin"), async (req, res) => {
   try {
     const { id } = req.params
 
-    const resultado = await sql`DELETE FROM inventario WHERE id = ${id} RETURNING *`
+    const resultado = await query("DELETE FROM inventario WHERE id = $1 RETURNING nome", [id])
 
-    if (resultado.length === 0) {
+    if (resultado.rows.length === 0) {
       return res.status(404).json({ erro: "Item não encontrado" })
     }
 
-    console.log("Deletar item - Sucesso:", id)
-    res.json({ mensagem: "Item deletado com sucesso" })
+    await query("INSERT INTO logs (usuario_id, acao, detalhes) VALUES ($1, $2, $3)", [
+      req.usuario.id,
+      "remover_item",
+      JSON.stringify({ item_id: id, nome: resultado.rows[0].nome }),
+    ])
+
+    res.json({ mensagem: "Item removido com sucesso" })
   } catch (erro) {
-    console.error("Deletar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao deletar item", detalhes: erro.message })
+    console.error("[v0] Erro ao remover item:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
   }
 })
 
-// Rota raiz para teste
-app.get("/", (req, res) => {
-  res.json({
-    mensagem: "WayneTech Security API",
-    status: "online",
-    timestamp: new Date().toISOString(),
-  })
-})
-
-// Rota de health check
-app.get("/api/health", async (req, res) => {
+app.get("/api/dashboard/estatisticas", verificarToken, async (req, res) => {
   try {
-    await sql`SELECT 1`
+    const [inventario, cameras, alertas] = await Promise.all([
+      query("SELECT COUNT(*) as total, status FROM inventario GROUP BY status"),
+      query("SELECT COUNT(*) as total, status FROM cameras GROUP BY status"),
+      query("SELECT COUNT(*) as total, nivel FROM alertas WHERE resolvido = false GROUP BY nivel"),
+    ])
+
     res.json({
-      status: "ok",
-      database: "connected",
-      timestamp: new Date().toISOString(),
+      inventario: inventario.rows,
+      cameras: cameras.rows,
+      alertas: alertas.rows,
     })
   } catch (erro) {
-    console.error("Health check - Erro no banco:", erro)
-    res.status(500).json({
-      status: "error",
-      database: "disconnected",
-      erro: erro.message,
-      timestamp: new Date().toISOString(),
-    })
+    console.error("[v0] Erro ao buscar estatísticas:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
   }
 })
 
-export default app
+app.get("/api/monitoramento/cameras", verificarToken, verificarNivel("gerente"), async (req, res) => {
+  try {
+    const resultado = await query("SELECT * FROM cameras ORDER BY id")
+    res.json(resultado.rows)
+  } catch (erro) {
+    console.error("[v0] Erro ao buscar câmeras:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
+  }
+})
+
+app.get("/api/monitoramento/alertas", verificarToken, verificarNivel("gerente"), async (req, res) => {
+  try {
+    const resultado = await query("SELECT * FROM alertas ORDER BY criado_em DESC LIMIT 10")
+    res.json(resultado.rows)
+  } catch (erro) {
+    console.error("[v0] Erro ao buscar alertas:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
+  }
+})
+
+app.get("/api/logs", verificarToken, verificarNivel("admin"), async (req, res) => {
+  try {
+    const resultado = await query(
+      `SELECT l.*, u.nome as usuario_nome 
+       FROM logs l 
+       LEFT JOIN usuarios u ON l.usuario_id = u.id 
+       ORDER BY l.criado_em DESC 
+       LIMIT 50`,
+    )
+    res.json(resultado.rows)
+  } catch (erro) {
+    console.error("[v0] Erro ao buscar logs:", erro)
+    res.status(500).json({ erro: "Erro no servidor" })
+  }
+})
+
+app.get("/api/health", (req, res) => {
+  res.json({ status: "online", timestamp: new Date().toISOString() })
+})
+
+// Iniciar servidor
+initDatabase()
+  .then(() => {
+    app.listen(PORTA, () => {
+      console.log(`🦇 Servidor WayneTech rodando na porta ${PORTA}`)
+    })
+  })
+  .catch((erro) => {
+    console.error("[v0] Erro ao inicializar banco de dados:", erro)
+    process.exit(1)
+  })
