@@ -1,117 +1,129 @@
-import express from "express"
-import cors from "cors"
-import pkg from "pg"
-import jwt from "jsonwebtoken"
-import bcrypt from "bcryptjs"
+import express from "express";
+import cors from "cors";
+import pkg from "pg";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
 
-const { Pool } = pkg
+const { Pool } = pkg;
 
-const app = express()
+const app = express();
 
-// Configuração do banco de dados
+// =========================
+// CONFIGURAÇÃO DO BANCO DE DADOS
+// =========================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-})
+});
 
-// Configuração de CORS para produção
+// =========================
+// CONFIGURAÇÃO DE CORS (para produção e desenvolvimento)
+// =========================
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
-  "https://waynetechsecurity.netlify.app", // URL do Netlify hardcoded
-  process.env.FRONTEND_URL,
-]
+  "https://waynetechsecurity.netlify.app", // frontend hospedado no Netlify
+  process.env.FRONTEND_URL, // variável de ambiente adicional
+];
 
 const corsOptions = {
   origin: (origin, callback) => {
-    console.log("CORS - Origin recebida:", origin)
-    console.log("CORS - Origens permitidas:", allowedOrigins)
+    console.log("CORS - Origin recebida:", origin);
+    console.log("CORS - Origens permitidas:", allowedOrigins);
 
-    // Permite requisições sem origin (Postman, curl, etc)
     if (!origin) {
-      console.log("CORS - Permitindo requisição sem origin")
-      return callback(null, true)
+      console.log("CORS - Permitindo requisição sem origin (Postman, curl, etc)");
+      return callback(null, true);
     }
 
-    // Verifica se a origin está na lista de permitidas
     if (allowedOrigins.indexOf(origin) !== -1) {
-      console.log("CORS - Origin permitida:", origin)
-      callback(null, true)
+      console.log("CORS - Origin permitida:", origin);
+      callback(null, true);
     } else {
-      console.log("CORS - Origin bloqueada:", origin)
-      callback(new Error("Not allowed by CORS"))
+      console.log("CORS - Origin bloqueada:", origin);
+      callback(new Error("Not allowed by CORS"));
     }
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-}
+};
 
-app.use(cors(corsOptions))
-app.use(express.json())
+app.use(cors(corsOptions));
+app.use(express.json());
 
-// Middleware de verificação de token
+// =========================
+// MIDDLEWARE DE VERIFICAÇÃO DE TOKEN
+// =========================
 const verificarToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"]
-  const token = authHeader && authHeader.split(" ")[1]
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
 
   if (!token) {
-    return res.status(401).json({ erro: "Token não fornecido" })
+    return res.status(401).json({ erro: "Token não fornecido" });
   }
 
   jwt.verify(token, process.env.JWT_SECRET, (erro, usuario) => {
     if (erro) {
-      return res.status(403).json({ erro: "Token inválido" })
+      return res.status(403).json({ erro: "Token inválido" });
     }
-    req.usuario = usuario
-    next()
-  })
-}
+    req.usuario = usuario;
+    next();
+  });
+};
 
-// Função para mapear nível de acesso para número
+// =========================
+// FUNÇÃO AUXILIAR PARA MAPEAR NÍVEL
+// =========================
 const obterNivelNumerico = (nivel) => {
   const niveis = {
     funcionario: 1,
     gerente: 2,
     admin: 3,
-  }
-  return niveis[nivel] || 0
-}
+  };
+  return niveis[nivel] || 0;
+};
 
-// Rota de login
+// =========================
+// ROTA DE LOGIN (CORRIGIDA)
+// =========================
 app.post("/api/auth/login", async (req, res) => {
-  console.log("Login - Requisição recebida:", req.body.email)
+  console.log("Login - Requisição recebida:", req.body.email);
 
   try {
-    const { email, senha } = req.body
+    const { email, senha } = req.body;
 
-    const resultado = await pool.query("SELECT * FROM usuarios WHERE email = $1", [email])
+    // Busca o usuário no banco
+    const resultado = await pool.query("SELECT * FROM usuarios WHERE email = $1", [email]);
 
     if (resultado.rows.length === 0) {
-      console.log("Login - Usuário não encontrado:", email)
-      return res.status(401).json({ erro: "Credenciais inválidas" })
+      console.log("Login - Usuário não encontrado:", email);
+      return res.status(401).json({ erro: "Credenciais inválidas" });
     }
 
-    const usuario = resultado.rows[0]
-    const senhaValida = await bcrypt.compare(senha, usuario.senha)
+    const usuario = resultado.rows[0];
+
+    // ✅ CORRIGIDO: o campo é "senha_hash" e não "senha"
+    const senhaValida = await bcrypt.compare(senha, usuario.senha_hash);
 
     if (!senhaValida) {
-      console.log("Login - Senha inválida para:", email)
-      return res.status(401).json({ erro: "Credenciais inválidas" })
+      console.log("Login - Senha inválida para:", email);
+      return res.status(401).json({ erro: "Credenciais inválidas" });
     }
 
+    // ✅ CORRIGIDO: o campo é "nivel_acesso" e não "nivel"
     const token = jwt.sign(
       {
         id: usuario.id,
         email: usuario.email,
         nome: usuario.nome,
-        nivel: usuario.nivel,
+        nivel: usuario.nivel_acesso,
       },
       process.env.JWT_SECRET,
-      { expiresIn: "24h" },
-    )
+      { expiresIn: "24h" }
+    );
 
-    console.log("Login - Sucesso para:", email)
+    console.log("Login - Sucesso para:", email);
 
     res.json({
       token,
@@ -119,39 +131,53 @@ app.post("/api/auth/login", async (req, res) => {
         id: usuario.id,
         nome: usuario.nome,
         email: usuario.email,
-        nivel: usuario.nivel,
+        nivel: usuario.nivel_acesso,
       },
-    })
+    });
   } catch (erro) {
-    console.error("Login - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao fazer login" })
+    console.error("Login - Erro interno:", erro);
+    res.status(500).json({ erro: "Erro ao fazer login" });
   }
-})
+});
 
-// Rota de verificação de token
+// =========================
+// ROTA DE VERIFICAÇÃO DE TOKEN (CORRIGIDA)
+// =========================
 app.get("/api/auth/verificar", verificarToken, async (req, res) => {
-  console.log("Verificar - Token válido para:", req.usuario.email)
+  console.log("Verificar - Token válido para:", req.usuario.email);
 
   try {
-    const resultado = await pool.query("SELECT id, nome, email, nivel FROM usuarios WHERE id = $1", [req.usuario.id])
+    // ✅ CORRIGIDO: incluir nivel_acesso
+    const resultado = await pool.query(
+      "SELECT id, nome, email, nivel_acesso FROM usuarios WHERE id = $1",
+      [req.usuario.id]
+    );
 
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ erro: "Usuário não encontrado" })
+      return res.status(404).json({ erro: "Usuário não encontrado" });
     }
 
-    res.json({ usuario: resultado.rows[0] })
-  } catch (erro) {
-    console.error("Verificar - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao verificar token" })
-  }
-})
+    // renomeia para manter padrão do frontend
+    const usuario = {
+      ...resultado.rows[0],
+      nivel: resultado.rows[0].nivel_acesso,
+    };
 
-// Rota de inventário com filtragem por nível
+    res.json({ usuario });
+  } catch (erro) {
+    console.error("Verificar - Erro:", erro);
+    res.status(500).json({ erro: "Erro ao verificar token" });
+  }
+});
+
+// =========================
+// ROTA DE INVENTÁRIO
+// =========================
 app.get("/api/inventario", verificarToken, async (req, res) => {
-  console.log("Inventário - Requisição de:", req.usuario.email, "Nível:", req.usuario.nivel)
+  console.log("Inventário - Requisição de:", req.usuario.email, "Nível:", req.usuario.nivel);
 
   try {
-    const nivelUsuario = obterNivelNumerico(req.usuario.nivel)
+    const nivelUsuario = obterNivelNumerico(req.usuario.nivel);
 
     const resultado = await pool.query(
       `SELECT * FROM inventario 
@@ -164,47 +190,51 @@ app.get("/api/inventario", verificarToken, async (req, res) => {
          END, 1
        ) <= $1 
        ORDER BY id`,
-      [nivelUsuario],
-    )
+      [nivelUsuario]
+    );
 
-    console.log("Inventário - Retornando", resultado.rows.length, "itens")
-    res.json(resultado.rows)
+    console.log("Inventário - Retornando", resultado.rows.length, "itens");
+    res.json(resultado.rows);
   } catch (erro) {
-    console.error("Inventário - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao buscar inventário" })
+    console.error("Inventário - Erro:", erro);
+    res.status(500).json({ erro: "Erro ao buscar inventário" });
   }
-})
+});
 
-// Rota de adicionar item ao inventário
+// =========================
+// ROTA PARA ADICIONAR ITEM
+// =========================
 app.post("/api/inventario", verificarToken, async (req, res) => {
-  console.log("Adicionar item - Requisição de:", req.usuario.email)
+  console.log("Adicionar item - Requisição de:", req.usuario.email);
 
   try {
-    const { nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo } = req.body
+    const { nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo } = req.body;
 
     const resultado = await pool.query(
       `INSERT INTO inventario 
        (nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
        RETURNING *`,
-      [nome, categoria, status, localizacao, modelo_3d, thumbnail, JSON.stringify(especificacoes), nivel_minimo],
-    )
+      [nome, categoria, status, localizacao, modelo_3d, thumbnail, JSON.stringify(especificacoes), nivel_minimo]
+    );
 
-    console.log("Adicionar item - Sucesso:", resultado.rows[0].id)
-    res.status(201).json(resultado.rows[0])
+    console.log("Adicionar item - Sucesso:", resultado.rows[0].id);
+    res.status(201).json(resultado.rows[0]);
   } catch (erro) {
-    console.error("Adicionar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao adicionar item" })
+    console.error("Adicionar item - Erro:", erro);
+    res.status(500).json({ erro: "Erro ao adicionar item" });
   }
-})
+});
 
-// Rota de atualizar item do inventário
+// =========================
+// ROTA PARA ATUALIZAR ITEM
+// =========================
 app.put("/api/inventario/:id", verificarToken, async (req, res) => {
-  console.log("Atualizar item - ID:", req.params.id)
+  console.log("Atualizar item - ID:", req.params.id);
 
   try {
-    const { id } = req.params
-    const { nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo } = req.body
+    const { id } = req.params;
+    const { nome, categoria, status, localizacao, modelo_3d, thumbnail, especificacoes, nivel_minimo } = req.body;
 
     const resultado = await pool.query(
       `UPDATE inventario 
@@ -213,54 +243,60 @@ app.put("/api/inventario/:id", verificarToken, async (req, res) => {
            atualizado_em = CURRENT_TIMESTAMP
        WHERE id = $9 
        RETURNING *`,
-      [nome, categoria, status, localizacao, modelo_3d, thumbnail, JSON.stringify(especificacoes), nivel_minimo, id],
-    )
+      [nome, categoria, status, localizacao, modelo_3d, thumbnail, JSON.stringify(especificacoes), nivel_minimo, id]
+    );
 
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ erro: "Item não encontrado" })
+      return res.status(404).json({ erro: "Item não encontrado" });
     }
 
-    console.log("Atualizar item - Sucesso:", id)
-    res.json(resultado.rows[0])
+    console.log("Atualizar item - Sucesso:", id);
+    res.json(resultado.rows[0]);
   } catch (erro) {
-    console.error("Atualizar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao atualizar item" })
+    console.error("Atualizar item - Erro:", erro);
+    res.status(500).json({ erro: "Erro ao atualizar item" });
   }
-})
+});
 
-// Rota de deletar item do inventário
+// =========================
+// ROTA PARA DELETAR ITEM
+// =========================
 app.delete("/api/inventario/:id", verificarToken, async (req, res) => {
-  console.log("Deletar item - ID:", req.params.id)
+  console.log("Deletar item - ID:", req.params.id);
 
   try {
-    const { id } = req.params
+    const { id } = req.params;
 
-    const resultado = await pool.query("DELETE FROM inventario WHERE id = $1 RETURNING *", [id])
+    const resultado = await pool.query("DELETE FROM inventario WHERE id = $1 RETURNING *", [id]);
 
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ erro: "Item não encontrado" })
+      return res.status(404).json({ erro: "Item não encontrado" });
     }
 
-    console.log("Deletar item - Sucesso:", id)
-    res.json({ mensagem: "Item deletado com sucesso" })
+    console.log("Deletar item - Sucesso:", id);
+    res.json({ mensagem: "Item deletado com sucesso" });
   } catch (erro) {
-    console.error("Deletar item - Erro:", erro)
-    res.status(500).json({ erro: "Erro ao deletar item" })
+    console.error("Deletar item - Erro:", erro);
+    res.status(500).json({ erro: "Erro ao deletar item" });
   }
-})
+});
 
-// Rota raiz para teste
+// =========================
+// ROTA PRINCIPAL / STATUS
+// =========================
 app.get("/", (req, res) => {
   res.json({
     mensagem: "WayneTech Security API",
     status: "online",
     timestamp: new Date().toISOString(),
-  })
-})
+  });
+});
 
-// Rota de health check
+// =========================
+// HEALTH CHECK
+// =========================
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() })
-})
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
 
-export default app
+export default app;
