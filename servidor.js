@@ -11,8 +11,31 @@ const app = express()
 const PORTA = process.env.PORT || 5000
 const CHAVE_JWT = process.env.JWT_SECRET || "waynetech_secret_key_2025"
 
-// Middlewares
-app.use(cors())
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  process.env.FRONTEND_URL,
+]
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Permitir requisições sem origin (mobile apps, Postman, etc)
+      if (!origin) return callback(null, true)
+
+      if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+        callback(null, true)
+      } else {
+        console.log("[v0] Origem bloqueada pelo CORS:", origin)
+        callback(new Error("Não permitido pelo CORS"))
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+)
+
 app.use(express.json())
 
 const niveisAcesso = {
