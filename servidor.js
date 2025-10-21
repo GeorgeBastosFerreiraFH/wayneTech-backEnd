@@ -14,8 +14,9 @@ const CHAVE_JWT = process.env.JWT_SECRET || "waynetech_secret_key_2025"
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
+  "https://waynetechsecurity.netlify.app",
   process.env.FRONTEND_URL,
-]
+].filter(Boolean)
 
 app.use(
   cors({
